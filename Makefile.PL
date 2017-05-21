@@ -12,10 +12,13 @@ while ($_ = shift) {
 
 # Default install path
 my $CONFDIR = $ENV{CONFDIR} || '/etc/ora2pg';
-my $DOCDIR = $ENV{DOCDIR} || '/usr/local/share/doc/ora2pg';
+my $RPM_CONFDIR = $CONFDIR;
+my $DOCDIR  = $ENV{DOCDIR} || '/usr/local/share/doc/ora2pg';
 my $DEST_CONF_FILE = 'ora2pg.conf.dist';
+my $DATA_LIMIT_DEFAULT = 10000;
 if ($^O =~ /MSWin32|dos/i) {
 	$DEST_CONF_FILE = 'ora2pg_dist.conf';
+	$DATA_LIMIT_DEFAULT = 2000;
 }
 
 my $PREFIX = $ENV{DESTDIR} || $ENV{PREFIX} || $ENV{INSTALL_BASE} ||  '';
@@ -23,25 +26,21 @@ $PREFIX =~ s/\/$//;
 $ENV{INSTALLDIRS} ||= 'site';
 
 # Try to set the default configuration directory following $PREFIX
-if ($^O !~ /MSWin32|dos/i) {
-	if ($PREFIX =~ m#^/usr/local(/|$)#) {
-		$CONFDIR = '/usr/local/etc';
-		$DOCDIR = '/usr/local/share/doc/ora2pg';
-	} elsif ($PREFIX =~ m#^/opt(/|$)#) {
-		$CONFDIR =  '/etc/opt';
-		$DOCDIR = '/opt/ora2pg';
-	} else {
-		$CONFDIR = '/etc';
-		$DOCDIR = '/usr/share/doc/ora2pg';
-	}
-} else {
+if ($^O =~ /MSWin32|dos/i) {
+	# Force default path
 	$CONFDIR = 'C:\ora2pg';
 	$DOCDIR = 'C:\ora2pg';
-}
-
-if ($PREFIX) {
-	$CONFDIR = $PREFIX . $CONFDIR;
-	$DOCDIR = $PREFIX . $DOCDIR;
+} elsif ($PREFIX) {
+	if (!$ENV{CONFDIR}) {
+		$CONFDIR = $PREFIX . '/etc/ora2pg';
+	} else {
+		$CONFDIR = $PREFIX . '/' . $ENV{CONFDIR};
+	}
+	if (!$ENV{DOCDIR}) {
+		$DOCDIR = $PREFIX . '/doc/ora2pg';
+	} else {
+		$DOCDIR = $PREFIX . '/' . $ENV{DOCDIR};
+	}
 }
 
 # Try to find all binary used by Ora2Pg
@@ -114,25 +113,38 @@ EXPORT_SCHEMA	0
 CREATE_SCHEMA	1
 
 # Enable this directive to force Oracle to compile schema before exporting code.
+# When this directive is enabled and SCHEMA is set to a specific schema name, 
+# only invalid objects in this schema will be recompiled. If SCHEMA is not set
+# then all schema will be recompiled. To force recompile invalid object in a
+# specific schema, set COMPILE_SCHEMA to the schema name you want to recompile.
 # This will ask to Oracle to validate the PL/SQL that could have been invalidate
-# after a export/import for example. If the value is 1 ora2pg will execute:
-# DBMS_UTILITY.compile_schema(schema => sys_context('USERENV', 'SESSION_USER'));
-# but if you provide the name of a particular schema it will use the following
-# command: DBMS_UTILITY.compile_schema(schema => 'schemaname');
+# after a export/import for example. The 'VALID' or 'INVALID' status applies to
+# functions, procedures, packages and user defined types.
 COMPILE_SCHEMA	0
 
-# PostreSQL search path schema to use. Can be a comma delimited list,
-# for example: users_schema,public will result in the following PostgreSQL 
-# schema path: SET search_path = users_schema,public;
-# By default search_path is set to Oracle schema and pg_catalog.
-#PG_SCHEMA	pg_catalog
+# By default if you set EXPORT_SCHEMA to 1 the PostgreSQL search_path will be
+# set to the schema name exported set as value of the SCHEMA directive. You can
+# defined/force the PostgreSQL schema to use by using this directive.
+#
+# The value can be a comma delimited list of schema but not when using TABLE
+# export type because in this case it will generate the CREATE SCHEMA statement
+# and it doesn't support multiple schema name. For example, if you set PG_SCHEMA
+# to something like "user_schema, public", the search path will be set like this
+#        SET search_path = user_schema, public;
+# forcing the use of an other schema (here user_schema) than the one from Oracle
+# schema set in the SCHEMA directive. You can also set the default search_path
+# for the PostgreSQL user you are using to connect to the destination database
+# by using:
+#        ALTER ROLE username SET search_path TO user_schema, public;
+#in this case you don't have to set PG_SCHEMA.
+#PG_SCHEMA	
 
 # Use this directive to add a specific schema to the search path to look
 # for PostGis functions.
 #POSTGIS_SCHEMA		
 
 # Allow to add a comma separated list of system user to exclude from 
-# from Oracle extraction. Oracle have many of them following the modules
+# Oracle extraction. Oracle have many of them following the modules
 # installed. By default it will suppress all object owned by the following
 # system users:
 #        CTXSYS,DBSNMP,EXFSYS,LBACSYS,MDSYS,MGMT_VIEW,OLAPSYS,ORDDATA,OWBSYS,
@@ -143,6 +155,17 @@ COMPILE_SCHEMA	0
 #        APEX_040200,DVSYS,OJVMSYS,GSMADMIN_INTERNAL,APPQOSSYS
 # Other list of users set to this directive will be added to this list.
 #SYSUSERS	OE,HR
+
+
+# List of schema to get functions/procedures meta information that are used
+# in the current schema export. When replacing call to function with OUT
+# parameters, if a function is declared in an other package then the function
+# call rewriting can not be done because Ora2Pg only know about functions
+# declared in the current schema. By setting a comma separated list of schema
+# as value of this directive, Ora2Pg will look forward in these packages for
+# all functions/procedures/packages declaration before proceeding to current
+# schema export.
+#LOOK_FORWARD_FUNCTION	SCOTT,OE
 
 
 #------------------------------------------------------------------------------
@@ -212,13 +235,37 @@ DISABLE_COMMENT         0
 # If export type is COPY or INSERT, the corresponding data will be exported.
 #VIEW_AS_TABLE	VIEW_NAME
 
+# When exporting GRANTs you can specify a comma separated  list of objects
+# for which privilege will be exported. Default is export for all objects.
+# Here are the possibles values TABLE, VIEW, MATERIALIZED VIEW, SEQUENCE,
+# PROCEDURE, FUNCTION, PACKAGE BODY, TYPE, SYNONYM, DIRECTORY. Only one object
+# type is allowed at a time. For example set it to TABLE if you just want to
+# export privilege on tables. You can use the -g option to overwrite it.
+# When used this directive prevent the export of users unless it is set to
+# USER. In this case only users definitions are exported.
+#GRANT_OBJECT    TABLE
+
 # By default Ora2Pg will export your external table as file_fdw tables. If
 # you don't want to export those tables at all, set the directive to 0.
 EXTERNAL_TO_FDW		1
 
 # Add a TRUNCATE TABLE instruction before loading data on COPY and INSERT
-# export.
+# export. When activated, the instruction will be added only if there's no
+# global DELETE clause or one specific to the current table (see bellow).
 TRUNCATE_TABLE	0
+
+# Support for include a DELETE FROM ... WHERE clause filter before importing
+# data and perform a delete of some lines instead of truncatinf tables.
+# Value is construct as follow: TABLE_NAME[DELETE_WHERE_CLAUSE], or
+# if you have only one where clause for all tables just put the delete
+# clause as single value. Both are possible too. Here are some examples:
+#DELETE  1=1	# Apply to all tables and delete all tuples
+#DELETE	TABLE_TEST[ID1='001']	# Apply only on table TABLE_TEST
+#DELETE	TABLE_TEST[ID1='001' OR ID1='002] DATE_CREATE > '2001-01-01' TABLE_INFO[NAME='test']
+# The last applies two different delete where clause on tables TABLE_TEST and
+# TABLE_INFO and a generic delete where clause on DATE_CREATE to all other tables.
+# If TRUNCATE_TABLE is enabled it will be applied to all tables not covered by
+# the DELETE definition.
 
 # When enabled this directive forces ora2pg to export all tables, index
 # constraints, and indexes using the tablespace name defined in Oracle database.
@@ -248,6 +295,154 @@ REORDERING_COLUMNS	0
 # If you have multiple tables to extract by replacing the Ora2Pg query, you can
 # define multiple REPLACE_QUERY lines.
 #REPLACE_QUERY	EMPLOYEES[SELECT e.id,e.fisrtname,lastname FROM EMPLOYEES e JOIN EMP_UPDT u ON (e.id=u.id AND u.cdate>'2014-08-01 00:00:00')]
+
+#------------------------------------------------------------------------------
+# FULL TEXT SEARCH SECTION (Control full text search export behaviors)
+#------------------------------------------------------------------------------
+
+# Force Ora2Pg to translate Oracle Text indexes into PostgreSQL indexes using
+# pg_trgm extension. Default is to translate CONTEXT indexes into FTS indexes
+# and CTXCAT indexes using pg_trgm. Most of the time using pg_trgm is enough,
+# this is why this directive stand for.
+#
+CONTEXT_AS_TRGM		0
+
+# By default Ora2Pg creates a function-based index to translate Oracle Text
+# indexes. 
+#    CREATE INDEX ON t_document
+#                 USING gin(to_tsvector('french', title));
+# You will have to rewrite the CONTAIN() clause using to_tsvector(), example:
+#    SELECT id,title FROM t_document
+#                    WHERE to_tsvector(title)) @@ to_tsquery('search_word');
+#
+# To force Ora2Pg to create an extra tsvector column with a dedicated triggers
+# for FTS indexes, disable this directive. In this case, Ora2Pg will add the
+# column as follow: ALTER TABLE t_document ADD COLUMN tsv_title tsvector;
+# Then update the column to compute FTS vectors if data have been loaded before
+#     UPDATE t_document SET tsv_title =
+#                       to_tsvector('french', coalesce(title,''));
+# To automatically update the column when a modification in the title column
+# appears, Ora2Pg adds the following trigger:
+#
+# CREATE FUNCTION tsv_t_document_title() RETURNS trigger AS \$\$
+# BEGIN
+#        IF TG_OP = 'INSERT' OR new.title != old.title THEN
+#                new.tsv_title :=
+#                to_tsvector('french', coalesce(new.title,''));
+#        END IF;
+#        return new;
+# END
+# \$\$ LANGUAGE plpgsql;
+# CREATE TRIGGER trig_tsv_t_document_title BEFORE INSERT OR UPDATE
+#  ON t_document
+#  FOR EACH ROW EXECUTE PROCEDURE tsv_t_document_title();
+#
+# When the Oracle text index is defined over multiple column, Ora2Pg will use
+# setweight() to set a weight in the order of the column declaration.
+#
+FTS_INDEX_ONLY	1
+
+# Use this directive to force text search configuration to use. When it is not
+# set, Ora2Pg will autodetect the stemmer used by Oracle for each index and
+# pg_catalog.english if nothing is found. 
+# 
+#FTS_CONFIG	pg_catalog.french
+
+# If you want to perform your text search in an accent insensitive way, enable
+# this directive. Ora2Pg will create an helper function over unaccent() and
+# creates the pg_trgm indexes using this function. With FTS Ora2Pg will
+# redefine your text search configuration, for example:
+#
+#	CREATE TEXT SEARCH CONFIGURATION fr (COPY = pg_catalog.french); 
+#	ALTER TEXT SEARCH CONFIGURATION fr
+#		ALTER MAPPING FOR hword, hword_part, word WITH unaccent, french_stem;
+#
+# When enabled, Ora2pg will create the wrapper function:
+#
+#	CREATE OR REPLACE FUNCTION unaccent_immutable(text)
+#	RETURNS text AS
+#	\$\$
+#		SELECT public.unaccent('public.unaccent', $1)
+#	\$\$  LANGUAGE sql IMMUTABLE
+#	    COST 1;
+#
+# indexes are exported as follow:
+#
+#	CREATE INDEX t_document_title_unaccent_trgm_idx ON t_document 
+#        	USING gin (unaccent_immutable(title) gin_trgm_ops);
+#
+# In your queries you will need to use the same function in the search to
+# be able to use the function-based index. Example:
+#
+#	SELECT * FROM t_document
+#		WHERE unaccent_immutable(title) LIKE '%donnees%';
+#
+USE_UNACCENT		0
+
+# Same as above but call lower() in the unaccent_immutable() function:
+#
+#      CREATE OR REPLACE FUNCTION unaccent_immutable(text)
+#      RETURNS text AS
+#      \$\$
+#          SELECT lower(public.unaccent('public.unaccent', $1));
+#      \$\$ LANGUAGE sql IMMUTABLE;
+#
+USE_LOWER_UNACCENT	0
+
+
+#------------------------------------------------------------------------------
+# DATA DIFF SECTION (only delete and insert actually changed rows)
+#------------------------------------------------------------------------------
+
+# EXPERIMENTAL! Not yet working correctly with partitioned tables, parallelism,
+# and direct Postgres connection! Test before using in production!
+# This feature affects SQL output for data (INSERT or COPY).
+# The deletion and (re-)importing of data is redirected to temporary tables
+# (with configurable suffix) and matching entries (i.e. quasi-unchanged rows)
+# eliminated before actual application of the DELETE, UPDATE and INSERT.
+# Optional functions can be specified that are called before or after the
+# actual DELETE, UPDATE and INSERT per table, or after all tables have been
+# processed.
+#
+# Enable DATADIFF functionality
+DATADIFF	0
+# Use UPDATE where changed columns can be matched by the primary key
+# (otherwise rows are DELETEd and re-INSERTed, which may interfere with
+# inverse foreign keys relationships!)
+DATADIFF_UPDATE_BY_PKEY	0
+# Suffix for temporary tables holding rows to be deleted and to be inserted.
+# Pay attention to your tables names:
+# 1) There better be no two tables with names such that name1 + suffix = name2
+# 2) length(suffix) + length(tablename) < NAMEDATALEN (usually 64)
+DATADIFF_DEL_SUFFIX _del
+DATADIFF_UPD_SUFFIX _upd
+DATADIFF_INS_SUFFIX _ins
+# Allow setting the work_mem and temp_buffers parameters
+# to keep temp tables in memory and have efficient sorting, etc.
+DATADIFF_WORK_MEM	256 MB
+DATADIFF_TEMP_BUFFERS	512 MB
+
+# The following are names of functions that will be called (via SELECT)
+# after the temporary tables have been reduced (by removing matching rows)
+# and right before or right after the actual DELETE and INSERT are performed.
+# They must take four arguments, which should ideally be of type "regclass",
+# representing the real table, the "deletions", the "updates", and the
+# "insertions" temp table names, respectively. They are called before
+# re-activation of triggers, indexes, etc. (if configured).
+#DATADIFF_BEFORE   my_datadiff_handler_function
+#DATADIFF_AFTER    my_datadiff_handler_function
+
+# Another function can be called (via SELECT) right before the entire COMMIT
+# (i.e., after re-activation of indexes, triggers, etc.), which will be
+# passed in Postgres ARRAYs of the table names of the real tables, the
+# "deletions", the "updates" and the "insertions" temp tables, respectively,
+# with same array index positions belonging together. So this function should
+# take four arguments of type regclass[]
+#DATADIFF_AFTER_ALL    my_datadiff_bunch_handler_function
+# If in doubt, use schema-qualified function names here.
+# The search_path will have been set to PG_SCHEMA if EXPORT_SCHEMA == 1
+# (as defined by you in those config parameters, see above),
+# i.e., the "public" schema is not contained if EXPORT_SCHEMA == 1
 
 
 #------------------------------------------------------------------------------
@@ -297,16 +492,18 @@ FKEY_DEFERRABLE	0
 # In addition when exporting data the DEFER_FKEY option set to 1 will add
 # a command to defer all foreign key constraints during data export and
 # the import will be done in a single transaction. This will work only if
-# foreign keys have been exported as deferrable. Constraints will then be
+# foreign keys have been exported as deferrable and you are not using direct
+# import to PostgreSQL (PG_DSN is not defined). Constraints will then be
 # checked at the end of the transaction. This directive can also be enabled 
 # if you want to force all foreign keys to be created as deferrable and
 # initially deferred during schema export (TABLE export type).
 DEFER_FKEY	0
 
 # If deferring foreign keys is not possible du to the amount of data in a
-# single transaction or you've not exported foreign keys as deferrable
-# you can use the DROP_FKEY directive. It will drop all foreign keys before
-# data import and recreate them at the end.
+# single transaction, you've not exported foreign keys as deferrable or you
+# are using direct import to PostgreSQL, you can use the DROP_FKEY directive.
+# It will drop all foreign keys before all data import and recreate them at
+# the end of the import.
 DROP_FKEY	0
 
 
@@ -336,12 +533,6 @@ DISABLE_TRIGGERS 0
 # Modify output from the following tables(fields separate by space or comma)
 #MODIFY_STRUCT	TABLE_TEST(dico,dossier)
 
-# Some time you need to force the destination type, for example a column
-# exported as timestamp by Ora2Pg can be forced into type date. Value is
-# a comma-separated list of TABLE:COLUMN:TYPE structure. If you need to use
-# comma or space inside type definition you will have to backslash them.
-#MODIFY_TYPE     TABLE1:COL3:varchar,TABLE1:COL4:decimal(9\,6)
-
 # You may wish to change table names during data extraction, especally for
 # replication use. Give a list of tables separate by space as follow.
 #REPLACE_TABLES	ORIG_TB_NAME1:NEW_TB_NAME1 ORIG_TB_NAME2:NEW_TB_NAME2 
@@ -360,12 +551,39 @@ PRESERVE_CASE	0
 # with same name as tables. Not so common but it can help.
 #INDEXES_SUFFIX		_idx
 
+# Enable this directive to rename all indexes using tablename_columns_names.
+# Could be very useful for database that have multiple time the same index name
+# or that use the same name than a table, which is not allowed by PostgreSQL
+# Disabled by default.
+INDEXES_RENAMING	0
+
+# Operator classes text_pattern_ops, varchar_pattern_ops, and bpchar_pattern_ops
+# support B-tree indexes on the corresponding types. The difference from the
+# default operator classes is that the values are compared strictly character by
+# character rather than according to the locale-specific collation rules. This
+# makes these operator classes suitable for use by queries involving pattern
+# matching expressions (LIKE or POSIX regular expressions) when the database
+# does not use the standard "C" locale. If you enable, with value 1, this will
+# force Ora2Pg to export all indexes defined on varchar2() and char() columns
+# using those operators. If you set it to a value greater than 1 it will only
+# change indexes on columns where the charactere limit is greater or equal than
+# this value. For example, set it to 128 to create these kind of indexes on
+# columns of type varchar2(N) where N >= 128.
+USE_INDEX_OPCLASS	0
+
 # Enable this directive if you want that your partition table name will be
 # exported using the parent table name. Disabled by default. If you have
 # multiple partitioned table, when exported to PostgreSQL some partitions
 # could have the same name but different parent tables. This is not allowed,
 # table name must be unique. 
 PREFIX_PARTITION	0
+
+# If you don't want to reproduce the partitioning like in Oracle and want to
+# export all partitionned Oracle data into the main single table in PostgreSQL
+# enable this directive. Ora2Pg will export all data into the main table name.
+# Default is to use partitionning, Ora2Pg will export data from each partition
+# and import them into the PostgreSQL dedicated partition table.
+DISABLE_PARTITION	0
 
 # Activating this directive will force Ora2Pg to add WITH (OIDS) when creating
 # tables or views as tables. Default is same as PostgreSQL, disabled.
@@ -377,7 +595,6 @@ ORA_RESERVED_WORDS	audit,comment
 # Enable this directive if you have tables or column names that are a reserved
 # word for PostgreSQL. Ora2Pg will double quote the name of the object. 
 USE_RESERVED_WORDS	0
-
 
 #------------------------------------------------------------------------------
 # OUTPUT SECTION (Control output to file or PostgreSQL database)
@@ -419,6 +636,12 @@ FILE_PER_CONSTRAINT	0
 # migration after the indexes creation to move the indexes.
 FILE_PER_INDEX		0
 
+# Allow foreign key declaration to be saved in a separate file during
+# schema export. By default foreign keys are exported into the main
+# output file or in the CONSTRAINT_output.sql file. When enabled foreign
+# keys will be exported into a file named FKEYS_output.sql
+FILE_PER_FKEYS		0
+
 # Allow data export to be saved in one file per table/view. The files
 # will be named as tablename_OUTPUT. Where OUTPUT is the value of the
 # corresponding configuration directive. You can use .gz xor .bz2
@@ -434,18 +657,34 @@ FILE_PER_TABLE	0
 # export type.
 FILE_PER_FUNCTION	0
 
-# Enforce perl to use binary mode for output using the given encoding. This
-# must be used if you experience the perl message: "Wide character in print"
-# The warning happens when you output a Unicode string to a non-unicode
-# file handle. If you set it to 'utf8' as follow, it will force printing
-# like this: binmode OUTFH, ":utf8"; This is normally autodetected when
-# the NLS_LANG use an unicode encoding.
+# By default Ora2Pg will force Perl to use utf8 I/O encoding. This is done through
+# a call to the Perl pragma:
+#
+#    use open ':utf8';
+#
+# You can override this encoding by using the BINMODE directive, for example you
+# can set it to :locale to use your locale or iso-8859-7, it will respectively use
+# 
+#    use open ':locale';
+#    use open ':encoding(iso-8859-7)';
+# 
+# If you have change the NLS_LANG in non UTF8 encoding, you might want to set this
+# directive. See http://perldoc.perl.org/5.14.2/open.html for more information.
+# Most of the time, you might leave this directive commented.
 #BINMODE		utf8
 
 # Set it to 0 to not include the call to \\set ON_ERROR_STOP ON in all SQL
 # scripts. By default this order is always present.
 STOP_ON_ERROR		1
 
+# Enable this directive to use COPY FREEZE instead of a simple COPY to
+# export data with rows already frozen. This is intended as a performance
+# option for initial data loading. Rows will be frozen only if the table
+# being loaded has been created or truncated in the current subtransaction.
+# This will only works with export to file and when -J or ORACLE_COPIES is
+# not set or default to 1. It can be used with direct import into PostgreSQL
+# under the same condition but -j or JOBS must also be unset or default to 1.
+COPY_FREEZE		0
 
 #------------------------------------------------------------------------------
 # TYPE SECTION (Control type behaviors and redefinitions)
@@ -454,8 +693,14 @@ STOP_ON_ERROR		1
 # If you're experiencing problems in data type export, the following directive
 # will help you to redefine data type translation used in Ora2pg. The syntax is
 # a comma separated list of "Oracle datatype:Postgresql data type". Here are the
-# data type that can be redefined and their default value.
-#DATA_TYPE	DATE:timestamp,LONG:text,LONG RAW:bytea,CLOB:text,NCLOB:text,BLOB:bytea,BFILE:bytea,RAW:bytea,ROWID:oid,FLOAT:double precision,DEC:decimal,DECIMAL:decimal,DOUBLE PRECISION:double precision,INT:integer,INTEGER:integer,REAL:real,SMALLINT:smallint,BINARY_FLOAT:double precision,BINARY_DOUBLE:double precision,TIMESTAMP:timestamp,XMLTYPE:xml,BINARY_INTEGER:integer,PLS_INTEGER:integer,TIMESTAMP WITH TIME ZONE:timestamp with time zone,TIMESTAMP WITH LOCAL TIME ZONE:timestamp with time zone
+# data type that can be redefined and their default value. If you want to
+# replace a type with a precision and scale you need to escape the coma with
+# a backslash. For example, if you want to replace all NUMBER(*,0) into bigint
+# instead of numeric(38)add the following:
+# 	DATA_TYPE	NUMBER(*\\,0):bigint
+# Here is the default replacement for all Oracle's types. You don't have to
+# recopy all type conversion but just the one you want to rewrite.
+#DATA_TYPE	DATE:timestamp,LONG:text,LONG RAW:bytea,CLOB:text,NCLOB:text,BLOB:bytea,BFILE:bytea,RAW:bytea,ROWID:oid,FLOAT:double precision,DEC:decimal,DECIMAL:decimal,DOUBLE PRECISION:double precision,INT:numeric,INTEGER:numeric,REAL:real,SMALLINT:smallint,BINARY_FLOAT:double precision,BINARY_DOUBLE:double precision,TIMESTAMP:timestamp,XMLTYPE:xml,BINARY_INTEGER:integer,PLS_INTEGER:integer,TIMESTAMP WITH TIME ZONE:timestamp with time zone,TIMESTAMP WITH LOCAL TIME ZONE:timestamp with time zone
 
 # If set to 1 replace portable numeric type into PostgreSQL internal type.
 # Oracle data type NUMBER(p,s) is approximatively converted to real and
@@ -492,6 +737,30 @@ ENABLE_MICROSECOND      1
 # field. You must set a space separated list of TRUE:FALSE values. BY default:
 #BOOLEAN_VALUES	yes:no y:n 1:0 true:false enabled:disabled
 
+# When Ora2Pg find a "zero" date: 0000-00-00 00:00:00 it is replaced by a NULL.
+# This could be a problem if your column is defined with NOT NULL constraint.
+# If you can not remove the constraint, use this directive to set an arbitral
+# date that will be used instead. You can also use -INFINITY if you don't want
+# to use a fake date.
+#REPLACE_ZERO_DATE	1970-01-01 00:00:00
+
+# Some time you need to force the destination type, for example a column
+# exported as timestamp by Ora2Pg can be forced into type date. Value is
+# a comma-separated list of TABLE:COLUMN:TYPE structure. If you need to use
+# comma or space inside type definition you will have to backslash them.
+#MODIFY_TYPE     TABLE1:COL3:varchar,TABLE1:COL4:decimal(9\\,6)
+
+# By default Oracle call to function TO_NUMBER will be translated as a cast
+# into numeric. For example, TO_NUMBER('10.1234') is converted into PostgreSQL
+# call to_number('10.1234')::numeric. If you want you can cast the call to integer
+# or bigint by changing the value of the configuration directive. If you need
+# better control of the format, just set it as value, for example:
+# 	TO_NUMBER_CONVERSION	99999999999999999999.9999999999
+# will convert the code above as:
+#	TO_NUMBER('10.1234', '99999999999999999999.9999999999')
+# Any value of the directive that it is not numeric, integer or bigint will
+# be taken as a mask format. If set to none, no conversion will be done.
+TO_NUMBER_CONVERSION	numeric
 
 #------------------------------------------------------------------------------
 # GRANT SECTION (Control priviledge and owner export)
@@ -515,7 +784,14 @@ FORCE_OWNER	0
 
 # Extract data by bulk of DATA_LIMIT tuples at once. Default 10000. If you set
 # a high value be sure to have enough memory if you have million of rows.
-DATA_LIMIT	10000
+DATA_LIMIT	$DATA_LIMIT_DEFAULT
+
+
+# When Ora2Pg detect a table with some BLOB it will automatically reduce the
+# value of this directive by dividing it by 10 until his value is below 1000.
+# You can control this value by setting BLOB_LIMIT. Exporting BLOB use lot of
+# ressources, setting it to a too high value can produce OOM.
+#BLOB_LIMIT	500
 
 # By default all data that are not of type date or time are escaped. If you
 # experience any problem with that you can set it to 1 to disable it. This
@@ -558,6 +834,15 @@ STANDARD_CONFORMING_STRINGS	1
 # to 1, it will truncate the data extracted to the LongReadLen value.
 #LONGTRUNCOK	0
 
+# Disable this if you don't want to load full content of BLOB and CLOB and use
+# LOB locators instead. This is usefull to not having to set LONGREADLEN. Note
+# that this will not improve speed of BLOB export as most of the time is always
+# consumed by the bytea escaping and in this case export is done line by line
+# and not by chunk of DATA_LIMIT rows. For more information on how it works, see
+# http://search.cpan.org/~pythian/DBD-Oracle-1.74/lib/DBD/Oracle.pm#Data_Interface_for_LOB_Locators
+# Default is enabled, it will not use LOB locators for backward compatibility.
+NO_LOB_LOCATOR  1
+
 # Use getStringVal() instead of getClobVal() for XML data export. Default is
 # enabled for backward compatibility.
 XML_PRETTY	0
@@ -595,11 +880,15 @@ INTERNAL_DATE_MAX	49
 # PERFORMANCES SECTION (Control export/import performances)
 #------------------------------------------------------------------------------
 
-# Multiprocess support. This directive replace the obsolete THREAD_COUNT
-# variable. Ora2Pg now use fork() to do parallel process instead of Perl
-# threads. This directive should defined the number of parallel connection
-# to PostgreSQL for direct data migration. The limit is the number of cores
-# on your machine. This is useful if PostgreSQL is the bottleneck. COPIES
+# This configuration directive adds multiprocess support to COPY, FUNCTION 
+# and PROCEDURE export type, the value is the number of process to use.
+# Default is to not use multiprocess. This directive is used to set the number
+# of cores to used to parallelize data import into PostgreSQL. During FUNCTION
+# or PROCEDURE export type each function will be translated to plpgsql using a
+# new process, the performances gain can be very important when you have tons
+# of function to convert. There's no more limitation in parallel processing
+# than the number of cores and the PostgreSQL I/O performance capabilities.
+# Doesn't works under Windows Operating System, it is simply disabled.
 JOBS		1
 
 # Multiprocess support. This directive should defined the number of parallel
@@ -643,7 +932,7 @@ SYNCHRONOUS_COMMIT	0
 
 
 #------------------------------------------------------------------------------
-# PLSQL SECTION (Control PL/SQL to PLPGSQL rewriting behaviors)
+# PLSQL SECTION (Control SQL and PL/SQL to PLPGSQL rewriting behaviors)
 #------------------------------------------------------------------------------
 
 # If the above configuration directive is not enough to validate your PL/SQL code
@@ -667,6 +956,11 @@ PLSQL_PGSQL	1
 # PostgreSQL makes the difference.
 NULL_EQUAL_EMPTY	0
 
+# Force empty_clob() and empty_blob() to be exported as NULL instead as empty
+# string for the first one and \\\\x for the second. If NULL is allowed in your
+# column this might improve data export speed if you have lot of empty lob.
+EMPTY_LOB_NULL		0
+
 # If you don't want to export package as schema but as simple functions you
 # might also want to replace all call to package_name.function_name. If you
 # disable the PACKAGE_AS_SCHEMA directive then Ora2Pg will replace all call
@@ -674,6 +968,26 @@ NULL_EQUAL_EMPTY	0
 # is to use a schema to emulate package.
 PACKAGE_AS_SCHEMA	1
 
+# Enable this directive if the rewrite of Oracle native syntax (+) of
+# OUTER JOIN is broken. This will force Ora2Pg to not rewrite such code,
+# default is to try to rewrite simple form of rigth outer join for the
+# moment.
+REWRITE_OUTER_JOIN	1
+
+# By default Ora2pg rewrite add_month(), add_year() and date_trunc() functions
+# set it to 0 to not translate those functions if it breaks code. 
+DATE_FUNCTION_REWRITE	1
+
+# By default Oracle functions are marked as STABLE as they can not modify data
+# unless when used in PL/SQL with variable assignment or as conditional
+# expression. You can force Ora2Pg to create these function as VOLATILE by
+# disabling the following configuration directive.
+FUNCTION_STABLE		1
+
+# By default call to COMMIT/ROLLBACK are kept untouched byt Ora2Pg to force
+# the user to review the logic of the function. Once it is fixed in Oracle
+# source code or you want to comment this calls enable the following directive
+COMMENT_COMMIT_ROLLBACK	0
 
 #------------------------------------------------------------------------------
 # ASSESSMENT SECTION (Control migration assessment behaviors)
@@ -697,6 +1011,24 @@ DUMP_AS_HTML		0
 # list in the SHOW_TABLE and SHOW_REPORT output. Default 10.
 TOP_MAX			10
 
+# Use this directive to redefined the number of human-days limit where the
+# migration assessment level must switch from B to C. Default is set to 10
+# human-days.
+HUMAN_DAYS_LIMIT	5
+
+# Set the comma separated list of username that must be used to filter
+# queries from the DBA_AUDIT_TRAIL table. Default is to not scan this
+# table and to never look for queries. This parameter is used only with
+# SHOW_REPORT and QUERY export type with no input file for queries.
+# Note that queries will be normalized before output unlike when a file
+# is given at input using the -i option or INPUT directive.
+#AUDIT_USER	USERNAME1,USERNAME2
+
+# By default Ora2Pg will convert call to SYS_GUID() Oracle function
+# with a call to uuid_generate_v4() from uuid-ossp extension. You can
+# redefined it to use the gen_random_uuid() function from pgcrypto
+# extension by changing the function name below.
+#UUID_FUNCTION	uuid_generate_v4
 
 #------------------------------------------------------------------------------
 # POSTGRESQL FEATURE SECTION (Control which PostgreSQL features are available)
@@ -713,16 +1045,35 @@ PG_SUPPORTS_INSTEADOF	1
 # the view.
 PG_SUPPORTS_MVIEW	1
 
-# If enabled, export view with CHECK OPTION. Enable it if you have PostgreSQL
-# version 9.4 or higher. Default, disabled
-PG_SUPPORTS_CHECKOPTION	0
+# If enabled, export view with CHECK OPTION. Disable it if you have PostgreSQL
+# version prior 9.4. Default, enabled
+PG_SUPPORTS_CHECKOPTION	1
 
 # PostgreSQL versions below 9.x do not support IF EXISTS in DDL statements.
 # Disabling the directive with value 0 will prevent Ora2Pg to add those
 # keywords in all generated statements.
 PG_SUPPORTS_IFEXISTS	1
 
+# PostgreSQL versions prior to 9.3 do not support the LATERAL keyword.
+# This is required for the DATADIFF feature.
+PG_SUPPORTS_LATERAL	1
 
+# Use btree_gin extenstion to create bitmap like index with pg >= 9.4
+# You will need to create the extension by yourself:
+#	create extension btree_gin;
+# Default is to create GIN index, when disabled, a btree index will be created
+BITMAP_AS_GIN		1
+
+# Use pg_background extension to create an autonomous transaction instead
+# of using a dblink wrapper. With pg >= 9.5 only, default is to use dblink.
+PG_BACKGROUND		0
+
+# By default if you have an autonomous transaction translated using dblink
+# extension instead of pg_background the connection is defined using the
+# values set with PG_DSN, PG_USER and PG_PWD. If you want to fully override
+# the connection string use this directive as follow to set the connection
+# in the autonomous transaction wrapper function.
+#DBLINK_CONN	port=5432 dbname=pgdb host=localhost user=pguser password=pgpass
 
 #------------------------------------------------------------------------------
 # SPATIAL SECTION (Control spatial geometry export)
@@ -777,11 +1128,32 @@ GEOMETRY_EXTRACT_TYPE	INTERNAL
 # is arbitrary set to orcl. This only concerns export type FDW.
 FDW_SERVER	orcl
 
+
+#------------------------------------------------------------------------------
+# MYSQL SECTION (Control MySQL export behavior)
+#------------------------------------------------------------------------------
+
+# Enable this if double pipe and double ampersand (|| and &&) should not be
+# taken as equivalent to OR and AND. It depend of the variable \@sql_mode,
+# Use it only if Ora2Pg fail on auto detecting this behavior.
+MYSQL_PIPES_AS_CONCAT		0
+
+# Enable this directive if you want EXTRACT() replacement to use the internal
+# format returned as an integer, for example DD HH24:MM:SS will be replaced
+# with format; DDHH24MMSS::bigint, this depend of your apps usage.
+MYSQL_INTERNAL_EXTRACT_FORMAT	0
+
 };
 close(OUTCFG);
 
 if ($^O !~ /MSWin32|dos/i) {
-	`perl -p -i -e "s#my \\\$CONFIG_FILE .*#my \\\$CONFIG_FILE = '$CONFDIR/ora2pg.conf';#" scripts/ora2pg`;
+	# Do not replace configuration directory in scripts/ora2pg if this is a RPM build.
+	if (!$ENV{RPM_BUILD_ROOT}) {
+		`perl -p -i -e 's#my \\\$CONFIG_FILE .*#my \\\$CONFIG_FILE = "$CONFDIR/ora2pg.conf";#' scripts/ora2pg`;
+	} else {
+		# Do not include prefix with rpmbuild
+		`perl -p -i -e 's#my \\\$CONFIG_FILE .*#my \\\$CONFIG_FILE = "$RPM_CONFDIR/ora2pg.conf";#' scripts/ora2pg`;
+	}
 } else {
 	my $tmp_conf = quotemeta($CONFDIR);
 	`perl -p -e "s#my \\\$CONFIG_FILE .*#my \\\$CONFIG_FILE = '$tmp_conf\\\\ora2pg.conf';#" scripts\\ora2pg > scripts\\ora2pg.tmp`;
@@ -798,12 +1170,12 @@ WriteMakefile(
 		      },
     'AUTHOR'       => 'Gilles Darold (gilles _AT_ darold _DOT_ net)',
     'ABSTRACT'     => 'Oracle to PostgreSQL migration toolkit',
-    'EXE_FILES'    => [ qw(scripts/ora2pg) ],
+    'EXE_FILES'    => [ qw(scripts/ora2pg scripts/ora2pg_scanner) ],
     'MAN3PODS'     => { 'doc/Ora2Pg.pod' => 'blib/man3/ora2pg.3' },
     'DESTDIR'      => $PREFIX,
     'INSTALLDIRS'  => $ENV{INSTALLDIRS},
     'clean'        => {FILES => "$DEST_CONF_FILE lib/blib/"},
-    'PREREQ_PM'    => { DBI => 0, DBD::Oracle },
+    'PREREQ_PM'    => {DBI => 0},
     'META_MERGE'   => {
 	resources  => {
 		homepage => 'http://ora2pg.darold.net/',
@@ -829,8 +1201,8 @@ sub MY::postamble {
 	my $postamble = qq{
 install_all :
 	\@echo "Installing default configuration file ($DEST_CONF_FILE) to $CONFDIR"
-	\@\$(MKPATH) $CONFDIR/ora2pg
-	\@\$(CP) -f $DEST_CONF_FILE $CONFDIR/ora2pg/$DEST_CONF_FILE
+	\@\$(MKPATH) $CONFDIR
+	\@\$(CP) -f $DEST_CONF_FILE $CONFDIR/$DEST_CONF_FILE
 	\@\$(MKPATH) $DOCDIR
 	\@\$(CP) -f README $DOCDIR/README
 	\@\$(CP) -f INSTALL $DOCDIR/INSTALL
